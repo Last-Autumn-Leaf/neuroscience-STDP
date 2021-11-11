@@ -2,8 +2,10 @@ from tools import *
 import timeit
 #Connection G to G : S
 
-def PlotStdpForm(eqs_stdp,on_pre,on_post):
+def PlotStdpForm(eqs_stdp,on_pre,on_post,duration=100):
     start_scope()
+
+
 
     # Création des neurones
     eqs_neuron = '''
@@ -22,7 +24,7 @@ def PlotStdpForm(eqs_stdp,on_pre,on_post):
     input_generator_synapses = Synapses(input_generator, G, on_pre='v_post += 2')  # Forcer des décharges
     input_generator_synapses.connect(i=[0, 1], j=[0, 1])
     # Faisons la simulation pour différents Delta t et calculons Delta w.
-    deltat = np.linspace(-50, 50, num=50)
+    deltat = np.linspace(-duration, duration, num=duration)
     deltaw = np.zeros(deltat.size)  # Vecteur pour les valeurs de Delta w
     # On utilise store() et restore() pour faire cette simulation, comme expliqué dans le notebook sur Brian2!
     store()
@@ -73,24 +75,39 @@ def fasterPlotSTDP(eqs_stdp,on_pre,on_post,tmax=70*ms,N=100):
 
 
 if __name__=='__main__':
+    c = -.05
+    d = .075
+    K = 2
+    #-K * np.exp(c * a) * np.sin(d * a) * (c ^ 2 + d ^ 2) / d
+    t0 = 0 * second
+    tau_a = 20 * ms
+    tau_b = 20 * ms
+    t0 = 0 * second
 
     eqs_stdp = '''
         w : 1
-        da/dt = -a / tau_a : 1 (event-driven) 
-        db/dt = -b / tau_b : 1 (event-driven)
-        tau_a =20*ms:second
-        tau_b =20*ms:second
-        A= 0.01:1
-        B= -0.01:1
+        t_spike_a : second 
+        t_spike_b : second
+        c = -0.05 : 1
+        d = 0.075 : 1
+        K = 2 : 1
+        A = 0.01 : 1
+        B = -A : 1
+        
     '''
+    # On peut avoir accès au temps avec la variable t dans la syntaxe des équations de Brian2
     on_pre = '''
+        
         v_post += w
-        a += A
-        w = w + b
+        t_spike_a = t
+        w = w + int(t_spike_b > t0) * B * exp((t_spike_b - t_spike_a)/tau_b)      # le cas Delta t < 0
+        t_spike_b = t0
     '''
     on_post = '''
-        b += B
-        w = w + a
+    
+        t_spike_b = t
+        w = w +  int(t_spike_a > t0) * -K * np.exp(c * t_spike_b - t_spike_a) * np.sin(d * t_spike_b - t_spike_a) * (c ^ 2 + d ^ 2) / d    # le cas Delta t > 0
+        t_spike_a = t0
     '''
 
 

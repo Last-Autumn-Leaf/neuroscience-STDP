@@ -1,64 +1,92 @@
+import matplotlib.pyplot as plt
+
 from tools import *
-from PlotStdpForm import PlotStdpForm
-N = 1000
-F = 15*Hz
-gmax=1/5
-# Création des neurones
-tau = 10*ms
+
+start_scope()
+duree=100
+tau = 10 * ms
 eqs_neuron = '''
 dv/dt = -v/tau : 1
 '''
+G = NeuronGroup(2, model=eqs_neuron, threshold='v>1', reset='v=0', method='euler')
+tau_a = tau_b = 20 * ms
 
-poisson_input = PoissonGroup(N, rates=F)
+tau_c= 1*ms
+K=0.01
+w_n=0.05
+z=0.7
+c=-z*w_n
+phi=np.pi/2
 
-neuron = NeuronGroup(1, model=eqs_neuron, threshold='v>1', reset='v=0', method='euler')
+A = 0.01
+B = -A
 
-# Création des synapses
+# Cette variable nous permet de réinitialiser les instants de décharge après que la STDP s'opère dans la synapse
+# On va utiliser la condition int(t_spike_a > t0) pour évaluer si oui ou non on opère le changement de poids
+t0 = 0 * second
 
 eqs_stdp = '''
     w : 1
-    da/dt = -a / tau_a : 1 (event-driven) 
-    db/dt = -b / tau_b : 1 (event-driven)
-    
-    tau_a = 20*ms : second
-    tau_b = 20*ms : second
-    A = 0.001 *gmax : 1
-    B = -0.001 *gmax : 1
-    gmax = 1./5. : 1
+    t_spike_a : second 
+    t_spike_b : second
 '''
+# On peut avoir accès au temps avec la variable t dans la syntaxe des équations de Brian2
 on_pre = '''
     v_post += w
-    a += A
-    w = clip(w + b,0,gmax)
+    t_spike_a = t
+    w = w + int(t_spike_b > t0) * B * exp((t_spike_b - t_spike_a)/tau_b)      # le cas Delta t < 0
+    t_spike_b = t0
 '''
-#w = clip(w + b,-gmax,0)
 on_post = '''
-    b += B
-    w = clip(w + a,0,gmax)
+    t_spike_b = t
+    w = w +  int(t_spike_a > t0) * K*exp(c* (t_spike_b - t_spike_a)/tau_c )*sin( (w_n*(t_spike_b - t_spike_a)/tau_c) +phi)
+    t_spike_a = t0
 '''
 
-#PlotStdpForm(eqs_stdp,on_pre,on_post)
 
-S = Synapses(poisson_input, neuron, model=eqs_stdp, on_pre=on_pre, on_post=on_post, method='euler')
-S.connect()
 
-S.w = 'rand() * gmax'
-mon = StateMonitor(S, 'w', record=[0,1])
-s_mon = SpikeMonitor(poisson_input)
+S = Synapses(G, G, model=eqs_stdp, on_pre=on_pre, on_post=on_post, method='euler')
 
-run(200*second, report='text')
+# Création d'une connexion synaptique
+S.connect(i=0, j=1)
 
-subplot(311)
-plot(S.w / gmax, '.k')
-ylabel('Weight / gmax')
-xlabel('Synapse index')
-subplot(312)
-hist(S.w / gmax, 20)
-xlabel('Weight / gmax')
-subplot(313)
-plot(mon.t/second, mon.w.T/gmax)
-xlabel('Time (s)')
-ylabel('Weight / gmax')
-tight_layout()
-show()
+# Générons maintenant des entrées pour nos neurones
+input_generator = SpikeGeneratorGroup(2, [], [] * ms)  # Our input layer consist of 2 neurons
+# Connectons ce générateur à nos deux neurones
+input_generator_synapses = Synapses(input_generator, G, on_pre='v_post += 2')  # Forcer des décharges
+input_generator_synapses.connect(i=[0, 1], j=[0, 1])
 
+# Faisons la simulation pour différents Delta t et calculons Delta w.
+deltat = np.linspace(-duree, duree, num=duree)
+deltaw = np.zeros(deltat.size)  # Vecteur pour les valeurs de Delta w
+
+store()
+
+for i in range(deltat.size):
+    dt = deltat[i]
+
+    restore()
+
+    # On fait en sorte que les neurones déchargent à 0 ms et à |dt| ms
+    # En fonction du signe de dt, les neurones vont décharger un avant l'autre
+    if dt < 0:
+        input_generator.set_spikes([0, 1], [-dt, 0] * ms)
+    else:
+        input_generator.set_spikes([0, 1], [0, dt] * ms)
+    run((np.abs(dt) + 1) * ms)
+    deltaw[i] = S.w[0]  # delta w est tout simplement w ici parce que w est à zéro initialement
+
+# Faisons le graphique de dw en fonction de dt
+plt.figure(figsize=(8, 5))
+plt.plot(deltat, deltaw, linestyle='-', marker='o')
+plt.title('STDP paramétrisée avec Brian2')
+plt.xlabel('Δt')
+plt.ylabel('Δw')
+axhline(y=0, color='black')
+#plt.ylim(min(A, B), max(A, B))
+plt.grid()
+plt.show()
+
+
+
+#G*exp(c* (t_spike_b - t_spike_a)/tau_c )*sin( (w_n*(t_spike_b - t_spike_a)/tau_c) +phi)
