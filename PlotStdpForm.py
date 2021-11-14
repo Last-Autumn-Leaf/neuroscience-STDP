@@ -1,36 +1,65 @@
 from tools import *
 import timeit
-#Connection G to G : S
-
-def PlotStdpForm(eqs_stdp,on_pre,on_post,duration=100):
-    start_scope()
 
 
+def PlotStdpForm(F1= None,F2= None,specials_var= None,duration=50,title=None):
 
-    # Création des neurones
-    eqs_neuron = '''
+    if F1 == None :
+        F1="gmax*.01 * exp(-(t_spike_b - t_spike_a)/taupost)"
+    if F2 == None:
+        F2="-gmax*.01*1.05 * exp((t_spike_b - t_spike_a)/taupre)"
+    if specials_var==None:
+        specials_var = """
+                taupre=20*ms :second
+                taupost=20*ms:second
+                gmax=0.01 :1
+            """
+
+    tau = 10 * ms
+    eqs_neurons = '''
     dv/dt = -v/tau : 1
-    tau : second
     '''
-    G = NeuronGroup(2, model=eqs_neuron, threshold='v>1', reset='v=0', method='euler')
-    G.tau = 10 * ms
+    G = NeuronGroup(2, model=eqs_neurons, threshold='v>1', reset='v=0', method='euler')
 
-    # Création des synapses
+
+    t0 = 0 * second
+
+    eqs_stdp = '''
+        w : 1
+        t_spike_a : second 
+        t_spike_b : second
+        {} 
+    '''.format(specials_var)
+
+    on_pre = '''
+        t_spike_a = t
+        w = w + int(t_spike_b > t0) * {}     
+        t_spike_b = t0
+    '''.format(F2)
+    on_post = '''
+        t_spike_b = t
+        w = w +  int(t_spike_a > t0) * {}   
+        t_spike_a = t0
+    '''.format(F1)
+
     S = Synapses(G, G, model=eqs_stdp, on_pre=on_pre, on_post=on_post, method='euler')
     S.connect(i=0, j=1)
 
-    input_generator = SpikeGeneratorGroup(2, [], [] * ms)  # Our input layer consist of 2 neurons
-    # Connectons ce générateur à nos deux neurones
-    input_generator_synapses = Synapses(input_generator, G, on_pre='v_post += 2')  # Forcer des décharges
+    input_generator = SpikeGeneratorGroup(2, [], [] * ms)
+    input_generator_synapses = Synapses(input_generator, G, on_pre='v_post += 2')
     input_generator_synapses.connect(i=[0, 1], j=[0, 1])
+
     # Faisons la simulation pour différents Delta t et calculons Delta w.
     deltat = np.linspace(-duration, duration, num=duration)
     deltaw = np.zeros(deltat.size)  # Vecteur pour les valeurs de Delta w
-    # On utilise store() et restore() pour faire cette simulation, comme expliqué dans le notebook sur Brian2!
+
     store()
+
     for i in range(deltat.size):
         dt = deltat[i]
+
         restore()
+
         # On fait en sorte que les neurones déchargent à 0 ms et à |dt| ms
         # En fonction du signe de dt, les neurones vont décharger un avant l'autre
         if dt < 0:
@@ -39,85 +68,28 @@ def PlotStdpForm(eqs_stdp,on_pre,on_post,duration=100):
             input_generator.set_spikes([0, 1], [0, dt] * ms)
         run((np.abs(dt) + 1) * ms)
         deltaw[i] = S.w[0]  # delta w est tout simplement w ici parce que w est à zéro initialement
-    # Faisons le graphique de dw en fonction de dt
+
+
     plt.figure(figsize=(8, 5))
     plt.plot(deltat, deltaw, linestyle='-', marker='o')
-    plt.title('STDP paramétrisée avec Brian2')
+    if title ==None:
+         title = 'STDP paramétrisée avec Brian2'
+    plt.title(title)
     plt.xlabel('Δt')
     plt.ylabel('Δw')
     axhline(y=0, color='black')
-    # plt.ylim(min(A, B), max(A, B))
     plt.grid()
     plt.show()
 
-
-def fasterPlotSTDP(eqs_stdp,on_pre,on_post,tmax=70*ms,N=100):
-    start_scope()
-    # Presynaptic neurons G spike at times from 0 to tmax
-    # Postsynaptic neurons G spike at times from tmax to 0
-    # So difference in spike times will vary from -tmax to +tmax
-    G = NeuronGroup(N, 'tspike:second', threshold='t>tspike', refractory=100 * ms)
-    H = NeuronGroup(N, 'tspike:second', threshold='t>tspike', refractory=100 * ms)
-    G.tspike = 'i*tmax/(N-1)'
-    H.tspike = '(N-1-i)*tmax/(N-1)'
-
-    S = Synapses(G, H,
-                 model=eqs_stdp, on_pre=on_pre, on_post=on_post,method='euler')
-    S.connect(j='i')
-
-    run(tmax + 1 * ms)
-
-    plot((H.tspike - G.tspike) / ms, S.w)
-    xlabel(r'$\Delta t$ (ms)')
-    ylabel(r'$\Delta w$')
-    axhline(0, ls='-', c='k');
-    show()
-
-
 if __name__=='__main__':
-    c = -.05
-    d = .075
-    K = 2
-    #-K * np.exp(c * a) * np.sin(d * a) * (c ^ 2 + d ^ 2) / d
-    t0 = 0 * second
-    tau_a = 20 * ms
-    tau_b = 20 * ms
-    t0 = 0 * second
 
-    eqs_stdp = '''
-        w : 1
-        t_spike_a : second 
-        t_spike_b : second
-        c = -0.05 : 1
-        d = 0.075 : 1
-        K = 2 : 1
-        A = 0.01 : 1
-        B = -A : 1
-        
-    '''
-    # On peut avoir accès au temps avec la variable t dans la syntaxe des équations de Brian2
-    on_pre = '''
-        
-        v_post += w
-        t_spike_a = t
-        w = w + int(t_spike_b > t0) * B * exp((t_spike_b - t_spike_a)/tau_b)      # le cas Delta t < 0
-        t_spike_b = t0
-    '''
-    on_post = '''
-    
-        t_spike_b = t
-        w = w +  int(t_spike_a > t0) * -K * np.exp(c * t_spike_b - t_spike_a) * np.sin(d * t_spike_b - t_spike_a) * (c ^ 2 + d ^ 2) / d    # le cas Delta t > 0
-        t_spike_a = t0
-    '''
+    start_scope()
 
-
-    start = timeit.default_timer()
-    PlotStdpForm(eqs_stdp,on_pre,on_post)
-    stop = timeit.default_timer()
-    print('Time Amad: ', stop - start)
-
-
-    '''PlotStdpForm(eqs_stdp,on_pre,on_post)
-    fasterPlstart = timeit.default_timer()
-    stop = timeit.default_timer()
-    print('Time brian: ', stop - start)'''
+    F1 = "gmax*.01 * exp(-(t_spike_b - t_spike_a)/taupost)"
+    F2 = "-gmax*.01*1.05 * exp((t_spike_b - t_spike_a)/taupre)"
+    specials_var="""
+        taupre=20*ms :second
+        taupost=20*ms:second
+        gmax=0.01 :1
+    """
+    PlotStdpForm(F1,F2,specials_var)

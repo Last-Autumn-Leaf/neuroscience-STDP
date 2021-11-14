@@ -1,7 +1,6 @@
 import matplotlib.pyplot as plt
 
 from tools import *
-
 start_scope()
 duree=100
 tau = 10 * ms
