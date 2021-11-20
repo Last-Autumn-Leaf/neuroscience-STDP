@@ -1,3 +1,5 @@
+import brian2.units.allunits
+
 from tools import *
 from PlotStdpForm import PlotStdpForm
 
@@ -15,7 +17,7 @@ poisson_input = PoissonGroup(N, rates=F)
 neuron = NeuronGroup(1, model=eqs_neuron, threshold='v>1', reset='v=0', method='euler')
 
 # Création des synapses
-
+brian2.units.allunits.radian
 eqs_stdp = '''
     w : 1
     da/dt = -a / tau_a : 1 (event-driven) 

@@ -2,7 +2,7 @@ from brian2 import *
 from PlotStdpForm import PlotStdpForm
 
 
-def BrianSTDPExemple(F1= None,F2= None,spec_vars=None):
+def BrianSTDPExemple(F1= None,F2= None,spec_vars=None,duration=100):
     N = 1000
     F = 15*Hz
 
@@ -56,7 +56,7 @@ def BrianSTDPExemple(F1= None,F2= None,spec_vars=None):
     mon = StateMonitor(S, 'w', record=[0, 1])
     s_mon = SpikeMonitor(input)
 
-    run(100*second, report='text')
+    run(duration*second, report='text')
 
     subplot(311)
     plot(S.w / gmax, '.k')
@@ -104,8 +104,10 @@ if __name__=='__main__' :
     if courbe :
         PlotStdpForm(F1,F2,spec_vars,duration=40,title="Forme B II")
     else :
+
         set_device('cpp_standalone')
         BrianSTDPExemple(F1,F2,spec_vars)
+        device.delete(force=True)
 
 
 

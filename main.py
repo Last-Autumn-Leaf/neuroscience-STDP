@@ -1,91 +1,247 @@
+import numpy as np
+from brian2 import units
+from sklearn import datasets, model_selection
+from brian2 import *
 import matplotlib.pyplot as plt
+# Cible de génération de code pour Brian2
+prefs.codegen.target = 'cython'
+#set_device('cpp_standalone', build_on_run=False)
+import time
+import os
 
-from tools import *
-start_scope()
-duree=100
-tau = 10 * ms
-eqs_neuron = '''
-dv/dt = -v/tau : 1
+
+duration = 1  # seconds
+freq = 440  # Hz
+
+print('importation...')
+X_all, y_all = datasets.fetch_openml('mnist_784', version=1, return_X_y=True, data_home=None)
+
+subset=3000
+test_size=int(subset/5)
+print('train size :',subset-test_size)
+print('test size :',test_size)
+X = X_all[:subset]
+y = y_all[:subset]
+X_train, X_test, y_train, y_test = model_selection.train_test_split(
+    X, y, test_size=test_size)
+
+# Fixons le seed aléatoire afin de pouvoir reproduire les résultats
+np.random.seed(0)
+# Horloge de Brian2
+defaultclock.dt = 0.5 * units.ms
+
+
+time_per_sample =   0.35 * units.second
+resting_time = 0.15 * units.second
+
+v_rest_e = -65. * units.mV
+v_rest_i = -60. * units.mV
+
+v_reset_e = -65. * units.mV
+v_reset_i = -45. * units.mV
+
+v_thresh_e = -52. * units.mV
+v_thresh_i = -40. * units.mV
+
+refrac_e = 5. * units.ms
+refrac_i = 2. * units.ms
+
+tc_theta = 1e7 * units.ms
+theta_plus_e = 0.05 * units.mV
+
+tc_pre_ee = 20 * units.ms
+tc_post_1_ee = 20 * units.ms
+tc_post_2_ee = 40 * units.ms
+
+# Taux d'apprentissage
+nu_ee_pre =  0.0001
+nu_ee_post = 0.01
+
+Ne=400
+Ni=Ne
+
+wmax_ee = 1.0
+
+delay={}
+delay['ee_input'] = (0*ms,10*ms)
+delay['ei_input'] = (0*ms,5*ms)
+input_intensity = 2.
+
+input_group = PoissonGroup(X_train.shape[1],0*Hz)
+
+neuron_model = '''
+    dv/dt = ((v_rest_e - v) + (I_synE + I_synI) / nS) / tau  : volt (unless refractory)
+
+    I_synE =  ge * nS * -v           : amp
+
+    I_synI =  gi * nS * (d_I_synI-v) : amp
+
+    dge/dt = -ge/(1.0*ms)            : 1
+
+    dgi/dt = -gi/(2.0*ms)            : 1
+
+    tau                              : second (constant, shared)
+
+    d_I_synI                         : volt (constant, shared)
+
+    dtheta/dt = -theta / (tc_theta)  : volt
 '''
-G = NeuronGroup(2, model=eqs_neuron, threshold='v>1', reset='v=0', method='euler')
-tau_a = tau_b = 20 * ms
 
-tau_c= 1*ms
-K=0.01
-w_n=0.05
-z=0.7
-c=-z*w_n
-phi=np.pi/2
+excitatory_group = NeuronGroup(
+    N=Ne, model=neuron_model, refractory=refrac_e,
+    threshold='v>v_thresh_e+ theta - 20.0*mV', reset='v=v_rest_e; theta += theta_plus_e', method='euler')
+excitatory_group.tau = 100 * units.ms
+excitatory_group.d_I_synI = -100. * units.mV
 
-A = 0.01
-B = -A
+inhibitory_group = NeuronGroup(
+    N=Ni, model=neuron_model, refractory=refrac_i,
+    threshold='v>v_thresh_i', reset='v=v_rest_i', method='euler')
+inhibitory_group.tau = 10 * units.ms
+inhibitory_group.d_I_synI = -85. * mV
 
-# Cette variable nous permet de réinitialiser les instants de décharge après que la STDP s'opère dans la synapse
-# On va utiliser la condition int(t_spike_a > t0) pour évaluer si oui ou non on opère le changement de poids
-t0 = 0 * second
+synapse_model = "w : 1"
 
-eqs_stdp = '''
+stdp_synapse_model = '''
     w : 1
-    t_spike_a : second 
-    t_spike_b : second
-'''
-# On peut avoir accès au temps avec la variable t dans la syntaxe des équations de Brian2
-on_pre = '''
-    v_post += w
-    t_spike_a = t
-    w = w + int(t_spike_b > t0) * B * exp((t_spike_b - t_spike_a)/tau_b)      # le cas Delta t < 0
-    t_spike_b = t0
-'''
-on_post = '''
-    t_spike_b = t
-    w = w +  int(t_spike_a > t0) * K*exp(c* (t_spike_b - t_spike_a)/tau_c )*sin( (w_n*(t_spike_b - t_spike_a)/tau_c) +phi)
-    t_spike_a = t0
+
+    plastic : boolean (shared) # Activer/désactiver la plasticité
+
+    post2before : 1
+
+    dpre/dt   =   -pre/(tc_pre_ee) : 1 (event-driven)
+
+    dpost1/dt  =  -post1/(tc_post_1_ee) : 1 (event-driven)
+
+    dpost2/dt  =  -post2/(tc_post_2_ee) : 1 (event-driven)
 '''
 
+stdp_pre = '''
+    ge_post += w
+
+    pre = 1.
+
+    w = clip(w - nu_ee_pre * post1*plastic, 0, wmax_ee)
+'''
+
+stdp_post = '''
+    post2before = post2
+
+    w = clip(w + nu_ee_post * pre * post2before*plastic, 0, wmax_ee)
+
+    post1 = 1.
+
+    post2 = 1.
+'''
+
+input_synapse = Synapses(input_group, excitatory_group, model=stdp_synapse_model, on_pre=stdp_pre, on_post=stdp_post)
+input_synapse.connect(True)  # Fully connected
+deltaDelay = delay['ee_input'][0] - delay['ee_input'][1]
+input_synapse.delay = 'deltaDelay*rand() '
+input_synapse.plastic = True
+input_synapse.w = '(rand()+0.1)*0.3'
+
+# e_i_synapse = Synapses(excitatory_group, inhibitory_group, model=stdp_synapse_model, on_pre=stdp_pre, on_post=stdp_post)
+e_i_synapse = Synapses(excitatory_group, inhibitory_group, model=synapse_model, on_pre="ge_post += w")
+e_i_synapse.connect(True, p=0.0025)
+e_i_synapse.w = 'rand()*10.4'
+
+i_e_synapse = Synapses(inhibitory_group, excitatory_group, model=synapse_model, on_pre="gi_post += w")
+i_e_synapse.connect(True, p=0.9)
+i_e_synapse.w = 'rand()*17.0'
+
+e_monitor = SpikeMonitor(excitatory_group, record=False)
+net = Network(input_group, excitatory_group, inhibitory_group,
+              input_synapse, e_i_synapse, i_e_synapse, e_monitor)
+
+# -------- ENTRRAINEMENT -----------------
+
+spikes = np.zeros((10, len(excitatory_group)))
+old_spike_counts = np.zeros(len(excitatory_group))
+
+# Entrainement
+number_of_epochs = 1
+mean_of_w=[]
+start = time.time()
+for i in range(number_of_epochs):
+
+    print('Starting iteration %i' % i)
+    for j, (sample, label) in enumerate(zip(X_train.values, y_train)):
+
+        # Afficher régulièrement l'état d'avancement
+        if (j % 10) == 0:
+            print("Running sample %i out of %i" % (j, len(X_train)))
+
+        # Normaliser les poids
+        weight_matrix = np.zeros((784, 400))
+        weight_matrix[input_synapse.i, input_synapse.j] = input_synapse.w
+        colSums = np.sum(weight_matrix, axis=0)
+        colFactors = 78 / colSums
+        for k in range(Ne):
+            weight_matrix[:, k] *= colFactors[k]
+        input_synapse.w = weight_matrix[input_synapse.i, input_synapse.j]
+        mean_of_w.append(np.mean(input_synapse.w))
+
+        # Configurer le taux d'entrée
+        input_group.rates = sample / 8. * input_intensity * units.Hz
+        # Simuler le réseau
+        net.run(time_per_sample)
 
 
-S = Synapses(G, G, model=eqs_stdp, on_pre=on_pre, on_post=on_post, method='euler')
+        # Enregistrer les décharges
+        spikes[int(label)] += e_monitor.count - old_spike_counts
+        # Gardons une copie du décompte de décharges pour pouvoir calculer le prochain
+        old_spike_counts = np.copy(e_monitor.count)
 
-# Création d'une connexion synaptique
-S.connect(i=0, j=1)
-
-# Générons maintenant des entrées pour nos neurones
-input_generator = SpikeGeneratorGroup(2, [], [] * ms)  # Our input layer consist of 2 neurons
-# Connectons ce générateur à nos deux neurones
-input_generator_synapses = Synapses(input_generator, G, on_pre='v_post += 2')  # Forcer des décharges
-input_generator_synapses.connect(i=[0, 1], j=[0, 1])
-
-# Faisons la simulation pour différents Delta t et calculons Delta w.
-deltat = np.linspace(-duree, duree, num=duree)
-deltaw = np.zeros(deltat.size)  # Vecteur pour les valeurs de Delta w
-
-store()
-
-for i in range(deltat.size):
-    dt = deltat[i]
-
-    restore()
-
-    # On fait en sorte que les neurones déchargent à 0 ms et à |dt| ms
-    # En fonction du signe de dt, les neurones vont décharger un avant l'autre
-    if dt < 0:
-        input_generator.set_spikes([0, 1], [-dt, 0] * ms)
-    else:
-        input_generator.set_spikes([0, 1], [0, dt] * ms)
-    run((np.abs(dt) + 1) * ms)
-    deltaw[i] = S.w[0]  # delta w est tout simplement w ici parce que w est à zéro initialement
-
-# Faisons le graphique de dw en fonction de dt
-plt.figure(figsize=(8, 5))
-plt.plot(deltat, deltaw, linestyle='-', marker='o')
-plt.title('STDP paramétrisée avec Brian2')
-plt.xlabel('Δt')
-plt.ylabel('Δw')
-axhline(y=0, color='black')
-#plt.ylim(min(A, B), max(A, B))
-plt.grid()
-plt.show()
+        # Arrêter l'entrée
+        input_group.rates = 0 * units.Hz
+        # Laisser les variables retourner à leurs valeurs de repos
+        net.run(resting_time)
 
 
 
-#G*exp(c* (t_spike_b - t_spike_a)/tau_c )*sin( (w_n*(t_spike_b - t_spike_a)/tau_c) +phi)
+
+end = time.time()
+print('----time training: ',end - start)
+# --------- TEST
+
+labeled_neurons = np.argmax(spikes, axis=1)
+print(labeled_neurons)
+
+# Déasctiver la plasticité STDP
+input_synapse.plastic = False
+
+num_correct_output = 0
+start = time.time()
+for i, (sample, label) in enumerate(zip(X_test.values, y_test)):
+    # Afficher régulièrement l'état d'avancement
+    if (i % 10) == 0:
+        print("Running sample %i out of %i" % (i, len(X_test)))
+
+    # Configurer le taux d'entrée
+    # ATTENTION, vous pouvez utiliser un autre type d'encodage
+    input_group.rates = sample / 8. * input_intensity * units.Hz
+
+    # Simuler le réseau
+    net.run(time_per_sample)
+
+    # Calculer le nombre de décharges pour l'échantillon
+    current_spike_count = e_monitor.count - old_spike_counts
+    # Gardons une copie du décompte de décharges pour pouvoir calculer le prochain
+    old_spike_counts = np.copy(e_monitor.count)
+
+    # Prédire la classe de l'échantillon
+    output_label = np.argmax(current_spike_count)
+
+    # Si la prédiction est correcte
+    if output_label == int(label):
+        num_correct_output += 1
+
+    # Laisser les variables retourner à leurs valeurs de repos
+    net.run(resting_time)
+end = time.time()
+print('----time test: ',end - start)
+print("The model accuracy is : %.3f" % (num_correct_output / len(X_test)))
+os.system('play -nq -t alsa synth {} sine {}'.format(duration, freq))
+os.system('say "Le programme est termine, precision de %.3f"'% (num_correct_output / len(X_test)))
+hist(input_synapse.w , 20)
+show()
